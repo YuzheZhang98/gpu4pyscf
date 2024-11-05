@@ -14,3 +14,6 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 from gpu4pyscf.qmmm import chelpg
+from gpu4pyscf.qmmm import itrf
+from gpu4pyscf.qmmm.itrf import *
+from gpu4pyscf.qmmm.mm_mole import Mole, create_mm_mol
