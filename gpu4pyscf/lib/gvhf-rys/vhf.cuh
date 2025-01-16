@@ -65,6 +65,15 @@ typedef struct {
 } JKMatrix;
 
 typedef struct {
+    double *vj1;
+    double *vj2;
+    double *dm1;
+    double *dm2;
+    uint16_t n_dm1;
+    uint16_t n_dm2;
+} JMatrix4Fold;
+
+typedef struct {
     double *ejk;
     double *dm;
     double j_factor;
@@ -99,6 +108,37 @@ typedef struct {
     float *dm_cond;
     float cutoff;
 } BoundsInfo;
+
+typedef struct {
+    uint8_t li;
+    uint8_t lj;
+    uint8_t lk;
+    uint8_t ll;
+    uint8_t nfi;
+    uint8_t nfk;
+    uint8_t nfij;
+    uint8_t nfkl;
+    uint8_t nroots;
+    uint8_t stride_j;
+    uint8_t stride_k;
+    uint8_t stride_l;
+    uint8_t iprim;
+    uint8_t jprim;
+    uint8_t kprim;
+    uint8_t lprim;
+    union {int ntile_ij_pairs; int npairs_ij;};
+    union {int ntile_kl_pairs; int npairs_kl;};
+    int *tile_ij_mapping;
+    int *tile_kl_mapping;
+    float *q_cond1;
+    float *q_cond2;
+    float *tile_q_cond1;
+    float *tile_q_cond2;
+    float *s_estimator;
+    float *dm_cond1;
+    float *dm_cond2;
+    float cutoff;
+} BoundsInfo4Fold;
 
 typedef struct {
     uint16_t i;

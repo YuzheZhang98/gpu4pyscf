@@ -56,7 +56,7 @@ static int _fill_jk_tasks(ShellQuartet *shl_quartet_idx,
     for (int t_kl_id = t_kl0+t_id; t_kl_id < t_kl1; t_kl_id += threads) {
         int tile_kl = tile_kl_mapping[t_kl_id];
         if (tile_q_ij + tile_q_cond[tile_kl] < cutoff) {
-            break;
+            break; // given a specific tile of ij, loop over kl tiles, if < cutoff then no need to calculate the current tile_ij and tile_kl
         }
         int tile_k = tile_kl / nbas_tiles;
         int tile_l = tile_kl % nbas_tiles;
@@ -65,14 +65,14 @@ static int _fill_jk_tasks(ShellQuartet *shl_quartet_idx,
         int ksh1 = ksh0 + TILE;
         int lsh1 = lsh0 + TILE;
         for (int ish = ish0; ish < ish1; ++ish) {
-            for (int jsh = jsh0; jsh < MIN(ish+1, jsh1); ++jsh) {
+            for (int jsh = jsh0; jsh < MIN(ish+1, jsh1); ++jsh) { // j <= i
                 int bas_ij = ish * nbas + jsh;
                 float q_ij = q_cond [bas_ij];
                 float d_ij = dm_cond[bas_ij];
-                for (int ksh = ksh0; ksh < MIN(ish+1, ksh1); ++ksh) {
+                for (int ksh = ksh0; ksh < MIN(ish+1, ksh1); ++ksh) { // k <= i
                     float d_ik = dm_cond[ish*nbas+ksh];
                     float d_jk = dm_cond[jsh*nbas+ksh];
-                    for (int lsh = lsh0; lsh < MIN(ksh+1, lsh1); ++lsh) {
+                    for (int lsh = lsh0; lsh < MIN(ksh+1, lsh1); ++lsh) { // l <= k
                         int bas_kl = ksh * nbas + lsh;
                         if (bas_ij < bas_kl) {
                             continue;
@@ -168,6 +168,152 @@ static int _fill_jk_tasks(ShellQuartet *shl_quartet_idx,
                                       dm_cond[jsh*nbas+lsh] > d_cutoff)) ||
                             (do_j && (d_ij                  > d_cutoff ||
                                       dm_cond[bas_kl      ] > d_cutoff))) {
+                            sq.k = ksh;
+                            sq.l = lsh;
+                            shl_quartet_idx[offset] = sq;
+                            ++offset;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return ntasks;
+}
+
+// 4-fold symmery
+__device__
+static int _fill_jk_tasks_4fold(ShellQuartet *shl_quartet_idx,
+                          RysIntEnvVars envs1, RysIntEnvVars envs2, 
+                          JMatrix4Fold j, BoundsInfo4Fold bounds,
+                          int batch_ij, int batch_kl)
+{
+    int nbas1 = envs1.nbas;
+    int nbas2 = envs2.nbas;
+    int *tile_ij_mapping = bounds.tile_ij_mapping;
+    int *tile_kl_mapping = bounds.tile_kl_mapping;
+    float *q_cond1 = bounds.q_cond1;
+    float *q_cond2 = bounds.q_cond2;
+    float *tile_q_cond1 = bounds.tile_q_cond1;
+    float *tile_q_cond2 = bounds.tile_q_cond2;
+    float *dm_cond1 = bounds.dm_cond1;
+    float *dm_cond2 = bounds.dm_cond2;
+    float cutoff = bounds.cutoff;
+    int t_id = threadIdx.y * blockDim.x + threadIdx.x;
+    int t_kl0 = batch_kl * TILES_IN_BATCH;
+    int t_kl1 = MIN(t_kl0 + TILES_IN_BATCH, bounds.ntile_kl_pairs);
+    int threads = blockDim.x * blockDim.y;
+
+    int tile_ij = tile_ij_mapping[batch_ij];
+    int nbas_tiles1 = nbas1 / TILE;
+    int tile_i = tile_ij / nbas_tiles1;
+    int tile_j = tile_ij % nbas_tiles1;
+    int ish0 = tile_i * TILE;
+    int jsh0 = tile_j * TILE;
+    int ish1 = ish0 + TILE;
+    int jsh1 = jsh0 + TILE;
+
+    int count = 0;
+    float tile_q_ij = tile_q_cond1[tile_ij];
+    for (int t_kl_id = t_kl0+t_id; t_kl_id < t_kl1; t_kl_id += threads) {
+        int tile_kl = tile_kl_mapping[t_kl_id];
+        if (tile_q_ij + tile_q_cond2[tile_kl] < cutoff) {
+            break; 
+        }
+        int nbas_tiles2 = nbas2 / TILE;
+        int tile_k = tile_kl / nbas_tiles2;
+        int tile_l = tile_kl % nbas_tiles2;
+        int ksh0 = tile_k * TILE;
+        int lsh0 = tile_l * TILE;
+        int ksh1 = ksh0 + TILE;
+        int lsh1 = lsh0 + TILE;
+        for (int ish = ish0; ish < ish1; ++ish) {
+            for (int jsh = jsh0; jsh < MIN(ish+1, jsh1); ++jsh) { // j <= i
+                int bas_ij = ish * nbas1 + jsh;
+                float q_ij = q_cond1 [bas_ij];
+                float d_ij = dm_cond1[bas_ij];
+                for (int ksh = ksh0; ksh < ksh1; ++ksh) { 
+                    for (int lsh = lsh0; lsh < MIN(ksh+1, lsh1); ++lsh) { // l <= k
+                        int bas_kl = ksh * nbas2 + lsh;
+                        float q_ijkl = q_ij + q_cond2[bas_kl];
+                        if (q_ijkl < cutoff) {
+                            continue;
+                        }
+                        float d_cutoff = cutoff - q_ijkl;
+                        if (d_ij                   > d_cutoff ||
+                            dm_cond2[bas_kl      ] > d_cutoff) {
+                            ++count;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda
+    extern __shared__ int thread_offsets[];
+    thread_offsets[t_id] = count;
+    // Up-sweep phase
+    for (int stride = 1; stride < threads; stride *= 2) {
+        __syncthreads();
+        int index = (t_id + 1) * stride * 2 - 1;
+        if (index < threads) {
+            thread_offsets[index] += thread_offsets[index-stride];
+        }
+    }
+    __syncthreads();
+    if (t_id == threads-1) { thread_offsets[threads-1] = 0; }
+    // Down-sweep phase
+    for (int stride = threads/2; stride > 0; stride /= 2) {
+        __syncthreads();
+        int index = (t_id + 1) * stride * 2 - 1;
+        if (index < threads) {
+            int temp = thread_offsets[index - stride];
+            thread_offsets[index - stride] = thread_offsets[index];
+            thread_offsets[index] += temp;
+        }
+    }
+    __syncthreads();
+    __shared__ int ntasks;
+    if (t_id == threads-1) {
+        ntasks = thread_offsets[threads-1] + count;
+    }
+    __syncthreads();
+    if (ntasks == 0) {
+        return ntasks;
+    }
+
+    int offset = thread_offsets[t_id];
+    for (int t_kl_id = t_kl0+t_id; t_kl_id < t_kl1; t_kl_id += threads) {
+        int tile_kl = tile_kl_mapping[t_kl_id];
+        if (tile_q_ij + tile_q_cond2[tile_kl] < cutoff) {
+            break;
+        }
+        int nbas_tiles2 = nbas2 / TILE;
+        int tile_k = tile_kl / nbas_tiles2;
+        int tile_l = tile_kl % nbas_tiles2;
+        int ksh0 = tile_k * TILE;
+        int lsh0 = tile_l * TILE;
+        int ksh1 = ksh0 + TILE;
+        int lsh1 = lsh0 + TILE;
+        ShellQuartet sq;
+        for (int ish = ish0; ish < ish1; ++ish) {
+            for (int jsh = jsh0; jsh < MIN(ish+1, jsh1); ++jsh) {
+                int bas_ij = ish * nbas1 + jsh;
+                float q_ij = q_cond1[bas_ij];
+                float d_ij = dm_cond1[bas_ij];
+                sq.i = ish;
+                sq.j = jsh;
+                for (int ksh = ksh0; ksh < ksh1; ++ksh) {
+                    for (int lsh = lsh0; lsh < MIN(ksh+1, lsh1); ++lsh) {
+                        int bas_kl = ksh * nbas2 + lsh;
+                        float q_ijkl = q_ij + q_cond2[bas_kl];
+                        if (q_ijkl < cutoff) {
+                            continue;
+                        }
+                        float d_cutoff = cutoff - q_ijkl;
+                        if (d_ij                   > d_cutoff ||
+                            dm_cond2[bas_kl      ] > d_cutoff) {
                             sq.k = ksh;
                             sq.l = lsh;
                             shl_quartet_idx[offset] = sq;

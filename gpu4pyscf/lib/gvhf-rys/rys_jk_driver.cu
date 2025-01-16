@@ -50,6 +50,10 @@ extern __global__ void rys_ejk_ip2_type3_kernel(RysIntEnvVars envs, JKEnergy jk,
 extern int rys_j_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
                     ShellQuartet *pool, uint32_t *batch_head,
                     int *scheme, int workers, double omega);
+extern int rys_j_unrolled_4fold(RysIntEnvVars *envs1, RysIntEnvVars *envs2, 
+                                JMatrix4Fold *j, BoundsInfo4Fold *bounds,
+                                ShellQuartet *pool, uint32_t *batch_head,
+                                int *scheme, int workers);
 extern int rys_jk_unrolled(RysIntEnvVars *envs, JKMatrix *jk, BoundsInfo *bounds,
                     ShellQuartet *pool, uint32_t *batch_head,
                     int *scheme, int workers, double omega);
@@ -132,6 +136,69 @@ int RYS_build_j(double *vj, double *dm, int n_dm, int nao,
             buflen += nf3_ij * TILE2; // dm_ij_cache
             rys_j_kernel<<<workers, threads, buflen*sizeof(double)>>>(envs, jk, bounds, pool, batch_head);
         }
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error in RYS_build_j: %s\n", cudaGetErrorString(err));
+        return 1;
+    }
+    return 0;
+}
+
+int RYS_build_j_4fold(double *vj1, double *vj2, double *dm1, double *dm2, 
+                      int n_dm1, int n_dm2, int nao1, int nao2,
+                      RysIntEnvVars envs1, RysIntEnvVars envs2,int *scheme, 
+                      int *shls_slice, int ntile_ij_pairs, int ntile_kl_pairs,
+                      int *tile_ij_mapping, int *tile_kl_mapping, 
+                      float *tile_q_cond1, float *tile_q_cond2, float *q_cond1, float *q_cond2, 
+                      float *s_estimator, float *dm_cond1, float *dm_cond2, float cutoff,
+                      ShellQuartet *pool, uint32_t *batch_head, int workers,
+                      int *atm1, int *atm2, int natm1, int natm2, 
+                      int *bas1, int *bas2, int nbas1, int nbas2, double *env1, double *env2)
+{
+    uint16_t ish0 = shls_slice[0];
+    uint16_t jsh0 = shls_slice[2];
+    uint16_t ksh0 = shls_slice[4];
+    uint16_t lsh0 = shls_slice[6];
+    uint8_t li = bas1[ANG_OF + ish0*BAS_SLOTS];
+    uint8_t lj = bas1[ANG_OF + jsh0*BAS_SLOTS];
+    uint8_t lk = bas2[ANG_OF + ksh0*BAS_SLOTS];
+    uint8_t ll = bas2[ANG_OF + lsh0*BAS_SLOTS];
+    uint8_t iprim = bas1[NPRIM_OF + ish0*BAS_SLOTS];
+    uint8_t jprim = bas1[NPRIM_OF + jsh0*BAS_SLOTS];
+    uint8_t kprim = bas2[NPRIM_OF + ksh0*BAS_SLOTS];
+    uint8_t lprim = bas2[NPRIM_OF + lsh0*BAS_SLOTS];
+    uint8_t nfi = (li+1)*(li+2)/2;
+    uint8_t nfj = (lj+1)*(lj+2)/2;
+    uint8_t nfk = (lk+1)*(lk+2)/2;
+    uint8_t nfl = (ll+1)*(ll+2)/2;
+    uint8_t nfij = nfi * nfj;
+    uint8_t nfkl = nfk * nfl;
+    uint8_t order = li + lj + lk + ll;
+    uint8_t nroots = order / 2 + 1;
+    double omega1 = env1[PTR_RANGE_OMEGA];
+    double omega2 = env2[PTR_RANGE_OMEGA];
+    if (omega1 < 0 || omega2 < 0) {
+        fprintf(stderr, "range-separated Coulomb not implmeneted in 4-fold\n");
+        return cudaErrorNotYetImplemented;
+    }
+    int lij = li + lj;
+    int lkl = lk + ll;
+    uint8_t stride_j = 1;
+    uint8_t stride_k = lij + 1;
+    uint8_t stride_l = lij + 1;
+    BoundsInfo4Fold bounds = {li, lj, lk, ll, nfi, nfk, nfij, nfkl,
+        nroots, stride_j, stride_k, stride_l, iprim, jprim, kprim, lprim,
+        ntile_ij_pairs, ntile_kl_pairs, tile_ij_mapping, tile_kl_mapping,
+        q_cond1, q_cond2, tile_q_cond1, tile_q_cond2, 
+        s_estimator, dm_cond1, dm_cond2, cutoff};
+
+    JMatrix4Fold j = {vj1, vj2, dm1, dm2, (uint16_t)n_dm1, (uint16_t)n_dm2};
+    cudaMemset(batch_head, 0, 2*sizeof(uint32_t));
+
+    if (!rys_j_unrolled_4fold(&envs1, &envs2, &j, &bounds, pool, batch_head, scheme, workers)) {
+        fprintf(stderr, "rys_j_unrolled_4fold is not implemented for high order ERIs\n");
+        return cudaErrorNotYetImplemented;
     }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

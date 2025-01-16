@@ -54,6 +54,8 @@ UNROLL_LMAX = ctypes.c_int.in_dll(libvhf_rys, 'rys_jk_unrolled_lmax').value
 UNROLL_NFMAX = ctypes.c_int.in_dll(libvhf_rys, 'rys_jk_unrolled_max_nf').value
 UNROLL_J_LMAX = ctypes.c_int.in_dll(libvhf_rys, 'rys_j_unrolled_lmax').value
 UNROLL_J_MAX_ORDER = ctypes.c_int.in_dll(libvhf_rys, 'rys_j_unrolled_max_order').value
+UNROLL_J_LMAX_4FOLD = ctypes.c_int.in_dll(libvhf_rys, 'rys_j_unrolled_lmax_4fold').value
+UNROLL_J_MAX_ORDER_4FOLD = ctypes.c_int.in_dll(libvhf_rys, 'rys_j_unrolled_max_order_4fold').value
 GOUT_WIDTH = 42
 SHM_SIZE = getattr(__config__, 'GPU_SHM_SIZE',
                    int(gpu_specs['sharedMemPerBlockOptin']//9)*8)
@@ -446,6 +448,401 @@ def get_j(mol, dm, hermi=0, vhfopt=None, verbose=None):
     log.timer('vj', *cput0)
     return vj
 
+# def get_j_4fold(mol, dm, hermi=0, vhfopt=None, verbose=None):
+#     '''Compute J matrix 4 fold
+#     '''
+#     log = logger.new_logger(mol, verbose)
+#     cput0 = log.init_timer()
+#     if vhfopt is None:
+#         vhfopt = _VHFOpt(mol).build()
+
+#     mol = vhfopt.sorted_mol
+#     nao, nao_orig = vhfopt.coeff.shape
+
+#     dm = cp.asarray(dm, order='C')
+#     dms = dm.reshape(-1,nao_orig,nao_orig)
+#     n_dm = dms.shape[0]
+#     assert n_dm == 1
+#     #:dms = cp.einsum('pi,nij,qj->npq', vhfopt.coeff, dms, vhfopt.coeff)
+#     dms = sandwich_dot(dms, vhfopt.coeff.T)
+#     dms = cp.asarray(dms, order='C')
+#     if hermi != 1:
+#         dms = transpose_sum(dms)
+#         dms *= .5
+
+#     ao_loc = mol.ao_loc
+#     dm_cond = cp.log(condense('absmax', dms, ao_loc) + 1e-300).astype(np.float32)
+#     log_max_dm = dm_cond.max()
+#     log_cutoff = math.log(vhfopt.direct_scf_tol)
+
+#     dms = dms.get()
+#     pair_loc = _make_j_engine_pair_locs(mol)
+#     dm_xyz = np.empty(pair_loc[-1])
+#     libvhf_rys.transform_cart_to_xyz(
+#         dm_xyz.ctypes, dms.ctypes, ao_loc.ctypes, pair_loc.ctypes,
+#         mol._bas.ctypes, ctypes.c_int(mol.nbas), mol._env.ctypes)
+#     dm_xyz = cp.asarray(dm_xyz)
+#     vj_xyz = cp.zeros_like(dm_xyz)
+
+#     pair_loc_on_gpu = cp.asarray(pair_loc)
+#     rys_envs = RysIntEnvVars(
+#         mol.natm, mol.nbas,
+#         vhfopt.rys_envs.atm, vhfopt.rys_envs.bas, vhfopt.rys_envs.env,
+#         pair_loc_on_gpu.data.ptr,
+#     )
+
+#     err = libvhf_rys.RYS_init_rysj_constant(ctypes.c_int(SHM_SIZE))
+#     if err != 0:
+#         raise RuntimeError('CUDA kernel initialization')
+
+#     uniq_l_ctr = vhfopt.uniq_l_ctr
+#     uniq_l = uniq_l_ctr[:,0]
+#     l_ctr_bas_loc = vhfopt.l_ctr_offsets
+#     l_symb = [lib.param.ANGULAR[i] for i in uniq_l]
+#     n_groups = np.count_nonzero(uniq_l <= LMAX)
+#     ntiles = mol.nbas // TILE
+#     tile_mappings = {}
+#     workers = gpu_specs['multiProcessorCount']
+#     pool = cp.empty((workers, QUEUE_DEPTH*4), dtype=np.uint16)
+#     info = cp.empty(2, dtype=np.uint32)
+
+#     for i in range(n_groups):
+#         for j in range(i+1):
+#             ish0, ish1 = l_ctr_bas_loc[i], l_ctr_bas_loc[i+1]
+#             jsh0, jsh1 = l_ctr_bas_loc[j], l_ctr_bas_loc[j+1]
+#             ij_shls = (ish0, ish1, jsh0, jsh1)
+#             i0 = ish0 // TILE
+#             i1 = ish1 // TILE
+#             j0 = jsh0 // TILE
+#             j1 = jsh1 // TILE
+#             sub_tile_q = vhfopt.tile_q_cond[i0:i1,j0:j1]
+#             mask = sub_tile_q > log_cutoff - log_max_dm
+#             if i == j:
+#                 mask = cp.tril(mask)
+#             t_ij = (cp.arange(i0, i1, dtype=np.int32)[:,None] * ntiles +
+#                     cp.arange(j0, j1, dtype=np.int32))
+#             idx = cp.argsort(sub_tile_q[mask])[::-1]
+#             tile_mappings[i,j] = t_ij[mask][idx]
+#     t1 = t2 = log.timer_debug1('q_cond and dm_cond', *cput0)
+
+#     timing_collection = {}
+#     kern_counts = 0
+#     kern = libvhf_rys.RYS_build_j_4fold
+
+#     for i in range(n_groups):
+#         for j in range(i+1):
+#             ij_shls = (l_ctr_bas_loc[i], l_ctr_bas_loc[i+1],
+#                        l_ctr_bas_loc[j], l_ctr_bas_loc[j+1])
+#             tile_ij_mapping = tile_mappings[i,j]
+#             for k in range(n_groups): # modified
+#                 for l in range(k+1):
+#                     llll = f'({l_symb[i]}{l_symb[j]}|{l_symb[k]}{l_symb[l]})'
+#                     kl_shls = (l_ctr_bas_loc[k], l_ctr_bas_loc[k+1],
+#                                l_ctr_bas_loc[l], l_ctr_bas_loc[l+1])
+#                     tile_kl_mapping = tile_mappings[k,l]
+#                     scheme = _j_engine_quartets_scheme_4fold(mol, uniq_l_ctr[[i, j, k, l]])
+#                     err = kern(
+#                         ctypes.cast(vj_xyz.data.ptr, ctypes.c_void_p),
+#                         ctypes.cast(dm_xyz.data.ptr, ctypes.c_void_p),
+#                         ctypes.c_int(n_dm), ctypes.c_int(nao),
+#                         rys_envs, (ctypes.c_int*3)(*scheme),
+#                         (ctypes.c_int*8)(*ij_shls, *kl_shls),
+#                         ctypes.c_int(tile_ij_mapping.size),
+#                         ctypes.c_int(tile_kl_mapping.size),
+#                         ctypes.cast(tile_ij_mapping.data.ptr, ctypes.c_void_p),
+#                         ctypes.cast(tile_kl_mapping.data.ptr, ctypes.c_void_p),
+#                         ctypes.cast(vhfopt.tile_q_cond.data.ptr, ctypes.c_void_p),
+#                         ctypes.cast(vhfopt.q_cond.data.ptr, ctypes.c_void_p),
+#                         lib.c_null_ptr(),
+#                         ctypes.cast(dm_cond.data.ptr, ctypes.c_void_p),
+#                         ctypes.c_float(log_cutoff),
+#                         ctypes.cast(pool.data.ptr, ctypes.c_void_p),
+#                         ctypes.cast(info.data.ptr, ctypes.c_void_p),
+#                         ctypes.c_int(workers),
+#                         mol._atm.ctypes, ctypes.c_int(mol.natm),
+#                         mol._bas.ctypes, ctypes.c_int(mol.nbas), mol._env.ctypes)
+#                     if err != 0:
+#                         raise RuntimeError(f'RYS_build_jk kernel for {llll} failed')
+#                     if log.verbose >= logger.DEBUG1:
+#                         t1, t1p = log.timer_debug1(f'processing {llll}, tasks = {info[1]}', *t1), t1
+#                         if llll not in timing_collection:
+#                             timing_collection[llll] = 0
+#                         timing_collection[llll] += t1[1] - t1p[1]
+#                         kern_counts += 1
+
+#     if log.verbose >= logger.DEBUG1:
+#         log.debug1('kernel launches %d', kern_counts)
+#         for llll, t in timing_collection.items():
+#             log.debug1('%s wall time %.2f', llll, t)
+#         cp.cuda.Stream.null.synchronize()
+#         log.timer_debug1('cuda kernel', *t2)
+
+#     vj_xyz = vj_xyz.get()
+#     vj = np.empty_like(dms)
+#     libvhf_rys.transform_xyz_to_cart(
+#         vj.ctypes, vj_xyz.ctypes, ao_loc.ctypes, pair_loc.ctypes,
+#         mol._bas.ctypes, ctypes.c_int(mol.nbas), mol._env.ctypes)
+#     #:vj = cp.einsum('pi,npq,qj->nij', vhfopt.coeff, cp.asarray(vj), vhfopt.coeff)
+#     vj = sandwich_dot(vj, vhfopt.coeff)
+#     vj = transpose_sum(vj)
+#     vj *= 2.
+#     vj = vj.reshape(dm.shape)
+
+#     h_shls = vhfopt.h_shls
+#     if h_shls:
+#         cput1 = log.timer_debug1('get_j pass 1 on gpu', *cput0)
+#         log.debug3('Integrals for %s functions on CPU', l_symb[LMAX+1])
+#         scripts = ['ji->s2kl']
+#         shls_excludes = [0, h_shls[0]] * 4
+#         vs_h = _vhf.direct_mapdm('int2e_cart', 's8', scripts,
+#                                  dms.get(), 1, mol._atm, mol._bas, mol._env,
+#                                  shls_excludes=shls_excludes)
+#         vj1 = vs_h[0].reshape(n_dm,nao,nao)
+#         coeff = vhfopt.coeff
+#         idx, idy = np.tril_indices(nao, -1)
+#         vj1[:,idy,idx] = vj1[:,idx,idy]
+#         for i, v in enumerate(vj1):
+#             vj[i] += coeff.T.dot(cp.asarray(v)).dot(coeff)
+#         log.timer_debug1('get_j pass 2 for h functions on cpu', *cput1)
+
+#     log.timer('vj', *cput0)
+#     return vj
+
+def get_j_4fold(mol1, mol2, dm1, dm2, hermi=0, vhfopt1=None, vhfopt2=None, verbose=None):
+    '''Compute J matrix 4 fold
+    '''
+    log = logger.new_logger(mol1, verbose)
+    cput0 = log.init_timer()
+    if vhfopt1 is None:
+        vhfopt1 = _VHFOpt(mol1).build()
+    if vhfopt2 is None:
+        vhfopt2 = _VHFOpt(mol2).build()
+
+    mol1 = vhfopt1.sorted_mol
+    nao1, nao_orig1 = vhfopt1.coeff.shape
+    mol2 = vhfopt2.sorted_mol
+    nao2, nao_orig2 = vhfopt2.coeff.shape
+
+    dm1 = cp.asarray(dm1, order='C')
+    dms1 = dm1.reshape(-1,nao_orig1,nao_orig1)
+    n_dm1 = dms1.shape[0]
+    dm2 = cp.asarray(dm2, order='C')
+    dms2 = dm2.reshape(-1,nao_orig2,nao_orig2)
+    n_dm2 = dms2.shape[0]
+    assert n_dm1 == 1 and n_dm2 == 1
+    #:dms = cp.einsum('pi,nij,qj->npq', vhfopt.coeff, dms, vhfopt.coeff)
+    dms1 = sandwich_dot(dms1, vhfopt1.coeff.T)
+    dms1 = cp.asarray(dms1, order='C')
+    dms2 = sandwich_dot(dms2, vhfopt2.coeff.T)
+    dms2 = cp.asarray(dms2, order='C')
+    if hermi != 1:
+        dms1 = transpose_sum(dms1)
+        dms1 *= .5
+        dms2 = transpose_sum(dms2)
+        dms2 *= .5
+
+    ao_loc1 = mol1.ao_loc
+    dm_cond1 = cp.log(condense('absmax', dms1, ao_loc1) + 1e-300).astype(np.float32)
+    log_max_dm1 = dm_cond1.max()
+    log_cutoff1 = math.log(vhfopt1.direct_scf_tol)
+    ao_loc2 = mol2.ao_loc
+    dm_cond2 = cp.log(condense('absmax', dms2, ao_loc2) + 1e-300).astype(np.float32)
+    log_max_dm2 = dm_cond2.max()
+    log_cutoff2 = math.log(vhfopt2.direct_scf_tol)
+    log_cutoff = min(log_cutoff1, log_cutoff2)
+
+    dms1 = dms1.get()
+    pair_loc1 = _make_j_engine_pair_locs(mol1)
+    dm_xyz1 = np.empty(pair_loc1[-1])
+    libvhf_rys.transform_cart_to_xyz(
+        dm_xyz1.ctypes, dms1.ctypes, ao_loc1.ctypes, pair_loc1.ctypes,
+        mol1._bas.ctypes, ctypes.c_int(mol1.nbas), mol1._env.ctypes)
+    dm_xyz1 = cp.asarray(dm_xyz1)
+    vj_xyz1 = cp.zeros_like(dm_xyz1)
+    dms2 = dms2.get()
+    pair_loc2 = _make_j_engine_pair_locs(mol2)
+    dm_xyz2 = np.empty(pair_loc2[-1])
+    libvhf_rys.transform_cart_to_xyz(
+        dm_xyz2.ctypes, dms2.ctypes, ao_loc2.ctypes, pair_loc2.ctypes,
+        mol2._bas.ctypes, ctypes.c_int(mol2.nbas), mol2._env.ctypes)
+    dm_xyz2 = cp.asarray(dm_xyz2)
+    vj_xyz2 = cp.zeros_like(dm_xyz2)
+
+    pair_loc_on_gpu1 = cp.asarray(pair_loc1)
+    rys_envs1 = RysIntEnvVars(
+        mol1.natm, mol1.nbas,
+        vhfopt1.rys_envs.atm, vhfopt1.rys_envs.bas, vhfopt1.rys_envs.env,
+        pair_loc_on_gpu1.data.ptr,
+    )
+    pair_loc_on_gpu2 = cp.asarray(pair_loc2)
+    rys_envs2 = RysIntEnvVars(
+        mol2.natm, mol2.nbas,
+        vhfopt2.rys_envs.atm, vhfopt2.rys_envs.bas, vhfopt2.rys_envs.env,
+        pair_loc_on_gpu2.data.ptr,
+    )
+
+    err = libvhf_rys.RYS_init_rysj_constant(ctypes.c_int(SHM_SIZE))
+    if err != 0:
+        raise RuntimeError('CUDA kernel initialization')
+
+    uniq_l_ctr1 = vhfopt1.uniq_l_ctr
+    uniq_l1 = uniq_l_ctr1[:,0]
+    l_ctr_bas_loc1 = vhfopt1.l_ctr_offsets
+    l_symb1 = [lib.param.ANGULAR[i] for i in uniq_l1]
+    n_groups1 = np.count_nonzero(uniq_l1 <= LMAX)
+    ntiles1 = mol1.nbas // TILE
+    tile_mappings1 = {}
+    uniq_l_ctr2 = vhfopt2.uniq_l_ctr
+    uniq_l2 = uniq_l_ctr2[:,0]
+    l_ctr_bas_loc2 = vhfopt2.l_ctr_offsets
+    l_symb2 = [lib.param.ANGULAR[i] for i in uniq_l2]
+    n_groups2 = np.count_nonzero(uniq_l2 <= LMAX)
+    ntiles2 = mol2.nbas // TILE
+    tile_mappings2 = {}
+    workers = gpu_specs['multiProcessorCount']
+    pool = cp.empty((workers, QUEUE_DEPTH*4), dtype=np.uint16)
+    info = cp.empty(2, dtype=np.uint32)
+
+    for i in range(n_groups1):
+        for j in range(i+1):
+            ish0, ish1 = l_ctr_bas_loc1[i], l_ctr_bas_loc1[i+1]
+            jsh0, jsh1 = l_ctr_bas_loc1[j], l_ctr_bas_loc1[j+1]
+            ij_shls = (ish0, ish1, jsh0, jsh1)
+            i0 = ish0 // TILE
+            i1 = ish1 // TILE
+            j0 = jsh0 // TILE
+            j1 = jsh1 // TILE
+            sub_tile_q = vhfopt1.tile_q_cond[i0:i1,j0:j1]
+            mask = sub_tile_q > log_cutoff - log_max_dm1
+            if i == j:
+                mask = cp.tril(mask)
+            t_ij = (cp.arange(i0, i1, dtype=np.int32)[:,None] * ntiles1 +
+                    cp.arange(j0, j1, dtype=np.int32))
+            idx = cp.argsort(sub_tile_q[mask])[::-1]
+            tile_mappings1[i,j] = t_ij[mask][idx]
+    for i in range(n_groups2):
+        for j in range(i+1):
+            ish0, ish1 = l_ctr_bas_loc2[i], l_ctr_bas_loc2[i+1]
+            jsh0, jsh1 = l_ctr_bas_loc2[j], l_ctr_bas_loc2[j+1]
+            ij_shls = (ish0, ish1, jsh0, jsh1)
+            i0 = ish0 // TILE
+            i1 = ish1 // TILE
+            j0 = jsh0 // TILE
+            j1 = jsh1 // TILE
+            sub_tile_q = vhfopt2.tile_q_cond[i0:i1,j0:j1]
+            mask = sub_tile_q > log_cutoff - log_max_dm2
+            if i == j:
+                mask = cp.tril(mask)
+            t_ij = (cp.arange(i0, i1, dtype=np.int32)[:,None] * ntiles2 +
+                    cp.arange(j0, j1, dtype=np.int32))
+            idx = cp.argsort(sub_tile_q[mask])[::-1]
+            tile_mappings2[i,j] = t_ij[mask][idx]
+    t1 = t2 = log.timer_debug1('q_cond and dm_cond', *cput0)
+
+    timing_collection = {}
+    kern_counts = 0
+    kern = libvhf_rys.RYS_build_j_4fold
+
+    for i in range(n_groups1):
+        for j in range(i+1):
+            ij_shls = (l_ctr_bas_loc1[i], l_ctr_bas_loc1[i+1],
+                       l_ctr_bas_loc1[j], l_ctr_bas_loc1[j+1])
+            tile_ij_mapping = tile_mappings1[i,j]
+            for k in range(n_groups2): # modified
+                for l in range(k+1):
+                    llll = f'({l_symb1[i]}{l_symb1[j]}|{l_symb2[k]}{l_symb2[l]})'
+                    kl_shls = (l_ctr_bas_loc2[k], l_ctr_bas_loc2[k+1],
+                               l_ctr_bas_loc2[l], l_ctr_bas_loc2[l+1])
+                    tile_kl_mapping = tile_mappings2[k,l]
+                    scheme = _j_engine_quartets_scheme_4fold(uniq_l_ctr1[[i, j]], uniq_l_ctr2[[k, l]])
+                    err = kern(
+                        ctypes.cast(vj_xyz1.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(vj_xyz2.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(dm_xyz1.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(dm_xyz2.data.ptr, ctypes.c_void_p),
+                        ctypes.c_int(n_dm1), ctypes.c_int(n_dm2),
+                        ctypes.c_int(nao1), ctypes.c_int(nao2),
+                        rys_envs1, rys_envs2, (ctypes.c_int*3)(*scheme),
+                        (ctypes.c_int*8)(*ij_shls, *kl_shls),
+                        ctypes.c_int(tile_ij_mapping.size),
+                        ctypes.c_int(tile_kl_mapping.size),
+                        ctypes.cast(tile_ij_mapping.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(tile_kl_mapping.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(vhfopt1.tile_q_cond.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(vhfopt2.tile_q_cond.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(vhfopt1.q_cond.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(vhfopt2.q_cond.data.ptr, ctypes.c_void_p),
+                        lib.c_null_ptr(),
+                        ctypes.cast(dm_cond1.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(dm_cond2.data.ptr, ctypes.c_void_p),
+                        ctypes.c_float(log_cutoff),
+                        ctypes.cast(pool.data.ptr, ctypes.c_void_p),
+                        ctypes.cast(info.data.ptr, ctypes.c_void_p),
+                        ctypes.c_int(workers),
+                        mol1._atm.ctypes, mol2._atm.ctypes,
+                        ctypes.c_int(mol1.natm), ctypes.c_int(mol2.natm),
+                        mol1._bas.ctypes, mol2._bas.ctypes,
+                        ctypes.c_int(mol1.nbas), ctypes.c_int(mol2.nbas), 
+                        mol1._env.ctypes, mol2._env.ctypes)
+                    if err != 0:
+                        raise RuntimeError(f'RYS_build_jk kernel for {llll} failed')
+                    if log.verbose >= logger.DEBUG1:
+                        t1, t1p = log.timer_debug1(f'processing {llll}, tasks = {info[1]}', *t1), t1
+                        if llll not in timing_collection:
+                            timing_collection[llll] = 0
+                        timing_collection[llll] += t1[1] - t1p[1]
+                        kern_counts += 1
+
+    if log.verbose >= logger.DEBUG1:
+        log.debug1('kernel launches %d', kern_counts)
+        for llll, t in timing_collection.items():
+            log.debug1('%s wall time %.2f', llll, t)
+        cp.cuda.Stream.null.synchronize()
+        log.timer_debug1('cuda kernel', *t2)
+
+    vj_xyz1 = vj_xyz1.get()
+    vj_xyz2 = vj_xyz2.get()
+    vj1 = np.empty_like(dms1)
+    vj2 = np.empty_like(dms2)
+    libvhf_rys.transform_xyz_to_cart(
+        vj1.ctypes, vj_xyz1.ctypes, ao_loc1.ctypes, pair_loc1.ctypes,
+        mol1._bas.ctypes, ctypes.c_int(mol1.nbas), mol1._env.ctypes)
+    libvhf_rys.transform_xyz_to_cart(
+        vj2.ctypes, vj_xyz2.ctypes, ao_loc2.ctypes, pair_loc2.ctypes,
+        mol2._bas.ctypes, ctypes.c_int(mol2.nbas), mol2._env.ctypes)
+    #:vj = cp.einsum('pi,npq,qj->nij', vhfopt.coeff, cp.asarray(vj), vhfopt.coeff)
+    vj1 = sandwich_dot(vj1, vhfopt1.coeff)
+    vj1 = transpose_sum(vj1)
+    vj1 *= 2.
+    vj1 = vj1.reshape(dm1.shape)
+
+    vj2 = sandwich_dot(vj2, vhfopt2.coeff)
+    vj2 = transpose_sum(vj2)
+    vj2 *= 2.
+    vj2 = vj2.reshape(dm2.shape)
+
+    h_shls = vhfopt1.h_shls or vhfopt2.h_shls
+    if h_shls:
+        raise NotImplementedError('h shells not supported in 4-fold j')
+    # if h_shls:
+    #     cput1 = log.timer_debug1('get_j pass 1 on gpu', *cput0)
+    #     log.debug3('Integrals for %s functions on CPU', l_symb[LMAX+1])
+    #     scripts = ['ji->s2kl']
+    #     shls_excludes = [0, h_shls[0]] * 4
+    #     vs_h = _vhf.direct_mapdm('int2e_cart', 's8', scripts,
+    #                              dms.get(), 1, mol._atm, mol._bas, mol._env,
+    #                              shls_excludes=shls_excludes)
+    #     vj1 = vs_h[0].reshape(n_dm,nao,nao)
+    #     coeff = vhfopt.coeff
+    #     idx, idy = np.tril_indices(nao, -1)
+    #     vj1[:,idy,idx] = vj1[:,idx,idy]
+    #     for i, v in enumerate(vj1):
+    #         vj[i] += coeff.T.dot(cp.asarray(v)).dot(coeff)
+    #     log.timer_debug1('get_j pass 2 for h functions on cpu', *cput1)
+
+    log.timer('vj', *cput0)
+    return vj1, vj2
+
 class _VHFOpt:
     def __init__(self, mol, cutoff=1e-13):
         self.mol = mol
@@ -703,6 +1100,60 @@ def _j_engine_quartets_scheme(mol, l_ctr_pattern, shm_size=SHM_SIZE):
     if CUDA_VERSION >= 12040:
         gout_stride *= 2
     return n, gout_stride, with_gout
+
+# def _j_engine_quartets_scheme_4fold(mol, l_ctr_pattern, shm_size=SHM_SIZE):
+#     ls = l_ctr_pattern[:,0]
+#     li, lj, lk, ll = ls
+#     order = li + lj + lk + ll
+#     lij = li + lj
+#     lkl = lk + ll
+#     nmax = max(lij, lkl)
+#     nps = l_ctr_pattern[:,1]
+#     ij_prims = nps[0] * nps[1]
+#     g_size = (lij+1)*(lkl+1)
+#     nf3_ij = (lij+1)*(lij+2)*(lij+3)//6
+#     nf3_kl = (lkl+1)*(lkl+2)*(lkl+3)//6
+#     nroots = order // 2 + 1
+#     # UNROLL_J_LMAX is different to UNROLL_LMAX of orbital basis. see rys_contract_j kernel
+#     if order <= UNROLL_J_MAX_ORDER_4FOLD and lij <= UNROLL_J_LMAX_4FOLD and lkl <= UNROLL_J_LMAX_4FOLD:
+#         if CUDA_VERSION >= 12040 and order <= 2:
+#             return 512, 1, False
+#         return 256, 1, False
+
+#     unit = nroots*2 + g_size*3 + ij_prims*4
+#     dm_cache_size = nf3_ij + nf3_kl*2 + (lij+1)*(lkl+1)*(nmax+2)
+#     gout_size = nf3_ij * nf3_kl
+#     if dm_cache_size < gout_size:
+#         unit += dm_cache_size
+#         shm_size -= nf3_ij * TILE*TILE * 8
+#         with_gout = False
+#     else:
+#         unit += gout_size
+#         with_gout = True
+
+#     if mol.omega < 0:
+#         unit += nroots*2
+#     counts = shm_size // (unit*8)
+#     n = min(THREADS, _nearest_power2(counts))
+#     gout_stride = THREADS // n
+#     if CUDA_VERSION >= 12040:
+#         gout_stride *= 2
+#     return n, gout_stride, with_gout
+def _j_engine_quartets_scheme_4fold(l_ctr_pattern_ij, l_ctr_pattern_kl):
+    ls_ij = l_ctr_pattern_ij[:,0]
+    ls_kl = l_ctr_pattern_kl[:,0]
+    li, lj = ls_ij
+    lk, ll = ls_kl
+    order = li + lj + lk + ll
+    lij = li + lj
+    lkl = lk + ll
+    # UNROLL_J_LMAX is different to UNROLL_LMAX of orbital basis. see rys_contract_j kernel
+    if order <= UNROLL_J_MAX_ORDER_4FOLD and lij <= UNROLL_J_LMAX_4FOLD and lkl <= UNROLL_J_LMAX_4FOLD:
+        if CUDA_VERSION >= 12040 and order <= 2:
+            return 512, 1, False
+        return 256, 1, False
+    else:
+        raise NotImplementedError(f'Exceed UNROLL_J_MAX_ORDER_4FOLD or UNROLL_J_LMAX_4FOLD')
 
 def _nearest_power2(n, return_leq=True):
     '''nearest 2**x that is leq or geq than n.
