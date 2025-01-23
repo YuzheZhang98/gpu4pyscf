@@ -13,3 +13,6 @@
 # limitations under the License.
 
 from gpu4pyscf.qmmm import chelpg
+from gpu4pyscf.qmmm import itrf
+from gpu4pyscf.qmmm.itrf import *
+from gpu4pyscf.qmmm.mm_mole import Mole, create_mm_mol
