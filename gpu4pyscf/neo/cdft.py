@@ -32,7 +32,7 @@ class CDFT(ks.KS):
         '''Set up position matrices for each quantum nucleus for constraint'''
         for t, comp in self.components.items():
             if t.startswith('n'):
-                comp.nuclear_expect_position = comp.mol.atom_coord(comp.mol.atom_index)
+                comp.nuclear_expect_position = to_cupy(comp.mol.atom_coord(comp.mol.atom_index))
                 # Position matrix with origin shifted to nuclear expectation position
                 s1e = comp.get_ovlp()
                 comp.int1e_r = to_cupy(comp.mol.intor_symmetric('int1e_r', comp=3)) \
@@ -88,9 +88,9 @@ class CDFT(ks.KS):
         # Suppress warning about nonzero charge (if neutral)
         charge = self.components['e'].mol.charge
         self.components['e'].mol.charge = self.mol.charge
-        el_dip = self.components['e'].dip_moment(mol.components['e'],
-                                                 dm['e'], unit=unit,
-                                                 origin=origin, verbose=verbose-1)
+        el_dip = to_cupy(self.components['e'].dip_moment(mol.components['e'],
+                                                         dm['e'], unit=unit,
+                                                         origin=origin, verbose=verbose-1))
         self.components['e'].mol.charge = charge
 
         # Quantum nuclei

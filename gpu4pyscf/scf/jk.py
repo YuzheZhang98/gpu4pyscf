@@ -840,7 +840,7 @@ def get_j_4fold(mol1, mol2, dm1, dm2, hermi=0, vhfopt1=None, vhfopt2=None, verbo
     #         vj[i] += coeff.T.dot(cp.asarray(v)).dot(coeff)
     #     log.timer_debug1('get_j pass 2 for h functions on cpu', *cput1)
 
-    log.timer('vj', *cput0)
+    log.timer('4fold vj', *cput0)
     return vj1, vj2
 
 class _VHFOpt:
