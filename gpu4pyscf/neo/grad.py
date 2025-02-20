@@ -17,10 +17,6 @@ from gpu4pyscf.lib.cupy_helper import tag_array, contract
 from pyscf.scf.jk import get_jk
 from pyscf import lib as pyscf_lib
 from pyscf import gto
-# from pyscf.dft.numint import eval_ao, eval_rho, _scale_ao
-# from pyscf.grad.rks import _d1_dot_
-# from pyscf.neo.ks import precompute_epc_electron, eval_epc
-
 
 def general_grad(grad_method):
     '''Modify gradient method to support general charge and mass.
@@ -55,6 +51,13 @@ def grad_elec(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
     mo_coeff = cupy.asarray(mo_coeff)
     dm0 = mf.make_rdm1(mo_coeff, mo_occ)
     dme0 = mf_grad.make_rdm1e(mo_energy, mo_coeff, mo_occ)
+    dm0 = tag_array(dm0, mo_coeff=mo_coeff, mo_occ=mo_occ)
+    ndim = dm0.ndim
+
+    if ndim > 2:
+        dm0_org = dm0
+        dm0 = dm0[0] + dm0[1]
+        dme0 = dme0[0] + dme0[1]
 
     # (\nabla i | hcore | j) - (\nabla i | j)
     h1 = cupy.asarray(mf_grad.get_hcore(mol))
@@ -68,11 +71,13 @@ def grad_elec(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
         dh1e += get_dh1e_ecp(mol, dm0)
     t3 = log.timer_debug1('gradients of h1e', *t3)
 
-    dvhf = mf_grad.get_veff(mol, dm0)
+    if ndim > 2:
+        dvhf = mf_grad.get_veff(mol, dm0_org)
+    else:
+        dvhf = mf_grad.get_veff(mol, dm0)
     log.timer_debug1('gradients of veff', *t3)
     log.debug('Computing Gradients of NR-HF Coulomb repulsion')
 
-    dm0 = tag_array(dm0, mo_coeff=mo_coeff, mo_occ=mo_occ)
     extra_force = cupy.zeros((len(atmlst),3))
     for k, ia in enumerate(atmlst):
         extra_force[k] += mf_grad.extra_force(ia, locals())
@@ -189,140 +194,28 @@ def grad_int(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
         aoslices1 = mol1.aoslice_by_atom()
         aoslices2 = mol2.aoslice_by_atom()
         for i0, ia in enumerate(atmlst):
-            shl01, shl11, p01, p11 = aoslices1[ia]
+            shl0, shl1, p0, p1 = aoslices1[ia]
             # Derivative w.r.t. mol1
-            if shl11 > shl01:
-                shls_slice = (shl01, shl11) + (0, mol1.nbas) + (0, mol2.nbas)*2
+            if shl1 > shl0:
+                shls_slice = (shl0, shl1) + (0, mol1.nbas) + (0, mol2.nbas)*2
                 v1 = get_jk((mol1, mol1, mol2, mol2),
                             dm2.get(), scripts='ijkl,lk->ij',
                             intor='int2e_ip1', aosym='s2kl', comp=3,
                             shls_slice=shls_slice)
                 de[i0] -= 2. * comp1.charge * comp2.charge * \
-                          numpy.einsum('xij,ij->x', v1, dm1[p01:p11].get())
-            shl02, shl12, p02, p12 = aoslices2[ia]
+                          numpy.einsum('xij,ij->x', v1, dm1[p0:p1].get())
+            shl0, shl1, p0, p1 = aoslices2[ia]
             # Derivative w.r.t. mol2
-            if shl12 > shl02:
-                shls_slice = (shl02, shl12) + (0, mol2.nbas) + (0, mol1.nbas)*2
+            if shl1 > shl0:
+                shls_slice = (shl0, shl1) + (0, mol2.nbas) + (0, mol1.nbas)*2
                 v1 = get_jk((mol2, mol2, mol1, mol1),
                             dm1.get(), scripts='ijkl,lk->ij',
                             intor='int2e_ip1', aosym='s2kl', comp=3,
                             shls_slice=shls_slice)
                 de[i0] -= 2. * comp1.charge * comp2.charge * \
-                          numpy.einsum('xij,ij->x', v1, dm2[p02:p12].get())
+                          numpy.einsum('xij,ij->x', v1, dm2[p0:p1].get())
 
-    # if log.verbose >= logger.DEBUG:
-    #     log.debug('gradients of Coulomb interaction')
-    #     rhf_grad._write(log, mol, de, atmlst)
     return de
-
-# def grad_epc(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
-#     '''Calculate EPC gradient contributions using pre-screened grids'''
-#     mf = mf_grad.base
-#     mol = mf_grad.mol
-#     if mo_energy is None: mo_energy = mf.mo_energy
-#     if mo_occ is None:    mo_occ = mf.mo_occ
-#     if mo_coeff is None:  mo_coeff = mf.mo_coeff
-
-#     if atmlst is None:
-#         atmlst = range(mol.natm)
-
-#     de = numpy.zeros((len(atmlst),3))
-
-#     # Early return if no EPC
-#     if mf.epc is None:
-#         return de
-
-#     log = logger.Logger(mf_grad.stdout, mf_grad.verbose)
-
-#     ni = mf._numint
-#     grids = mf.grids
-
-#     # Get all nuclear components
-#     n_types = []
-#     mol_n = {}
-#     non0tab_n = {}
-#     vxc_n = {}
-#     ao_loc_n = {}
-
-#     for t, comp in mf.components.items():
-#         if not t.startswith('n'):
-#             continue
-#         mol_n_t = comp.mol
-#         ia = mol_n_t.atom_index
-#         if mol_n_t.super_mol.atom_pure_symbol(ia) == 'H' and \
-#             (isinstance(mf.epc, str) or ia in mf.epc['epc_nuc']):
-#             n_types.append(t)
-#             mol_n[t] = mol_n_t
-#             non0tab_n[t] = ni.make_mask(mol_n_t, grids.coords)
-#             nao_n = mol_n_t.nao
-#             vxc_n[t] = numpy.zeros((3,nao_n,nao_n))
-#             ao_loc_n[t] = mol_n_t.ao_loc_nr()
-
-#     if len(n_types) == 0:
-#         return de
-
-#     mf_e = mf.components['e']
-#     assert(mf._elec_grids_hash == neo.ks._hash_grids(mf_e.grids))
-
-#     dm0 = mf.make_rdm1(mo_coeff, mo_occ)
-
-#     # Get electron component
-#     mol_e = mf_e.mol
-#     dm_e = dm0['e']
-#     if dm_e.ndim > 2:
-#         dm_e = dm_e[0] + dm_e[1]
-#     nao_e = mol_e.nao
-#     ao_loc_e = mol_e.ao_loc_nr()
-#     vxc_e = numpy.zeros((3,nao_e,nao_e))
-
-#     # Single grid loop over pre-screened points
-#     for ao_e, mask_e, weight, coords in ni.block_loop(mol_e, grids, nao_e, 1):
-#         # Get electron density and precompute EPC terms once
-#         rho_e = eval_rho(mol_e, ao_e[0], dm_e)
-#         rho_e[rho_e < 0] = 0
-#         common = precompute_epc_electron(mf.epc, rho_e)
-
-#         vxc_e_grid = 0
-
-#         for n_type in n_types:
-#             mol_n_t = mol_n[n_type]
-#             mask_n = non0tab_n[n_type]
-
-#             # Get nuclear density
-#             ao_n = eval_ao(mol_n_t, coords, deriv=1, non0tab=mask_n)
-#             rho_n = eval_rho(mol_n_t, ao_n[0], dm0[n_type])
-#             rho_n[rho_n < 0] = 0
-
-#             # Get EPC quantities
-#             _, vxc_n_grid, vxc_e_grid_t = eval_epc(common, rho_n)
-#             vxc_e_grid += vxc_e_grid_t
-
-#             # Nuclear gradient contribution
-#             aow = _scale_ao(ao_n[0], weight * vxc_n_grid)
-#             _d1_dot_(vxc_n[n_type], mol_n_t, ao_n[1:4],
-#                      aow, mask_n, ao_loc_n[n_type], True)
-
-#         # Electronic gradient contribution
-#         aow = _scale_ao(ao_e[0], weight * vxc_e_grid)
-#         _d1_dot_(vxc_e, mol_e, ao_e[1:4], aow, mask_e, ao_loc_e, True)
-
-#     aoslices = mol_e.aoslice_by_atom()
-#     for i0, ia in enumerate(atmlst):
-#         p0, p1 = aoslices[ia,2:]
-#         de[i0] -= numpy.einsum('xij,ij->x', vxc_e[:,p0:p1], dm_e[p0:p1]) * 2
-
-#     for n_type in n_types:
-#         aoslices = mol_n[n_type].aoslice_by_atom()
-#         for i0, ia in enumerate(atmlst):
-#             p0, p1 = aoslices[ia,2:]
-#             if p1 > p0:
-#                 de[i0] -= numpy.einsum('xij,ij->x', vxc_n[n_type][:,p0:p1],
-#                                        dm0[n_type][p0:p1]) * 2
-
-    # if log.verbose >= logger.DEBUG:
-    #     log.debug('gradients of EPC contribution')
-    #     rhf_grad._write(log, mol, de, atmlst)
-#     return de
 
 def grad_hcore_mm(mf_grad, dm=None, mol=None):
     '''Calculate QMMM gradient for MM atoms'''
@@ -546,7 +439,6 @@ class Gradients(rhf_grad.GradientsBase):
     grad = pyscf_lib.alias(kernel, alias_name='grad')
 
     grad_int = grad_int
-    # grad_epc = grad_epc
     grad_hcore_mm = grad_hcore_mm
     grad_nuc_mm = grad_nuc_mm
 

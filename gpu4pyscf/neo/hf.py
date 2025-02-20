@@ -19,7 +19,6 @@ from gpu4pyscf.lib import logger
 from pyscf.scf import chkfile
 from pyscf.scf.hf import TIGHT_GRAD_CONV_TOL
 
-
 def init_guess_mixed(mol, mixing_parameter = cupy.pi/4):
     ''' Copy from pyscf/examples/scf/56-h2_symm_breaking.py
 
@@ -187,7 +186,7 @@ class ComponentSCF(Component):
         self.nuc_occ_state = nuc_occ_state
 
     def undo_component(self):
-        obj = lib.view(self, pyscf_lib.drop_class(self.__class__, Component))
+        obj = pyscf_lib.view(self, pyscf_lib.drop_class(self.__class__, Component))
         return obj
 
     def get_hcore(self, mol=None):
@@ -367,9 +366,9 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, vint=None, dm=None, cycle=-1,
     if vhf is None: vhf = mf.get_veff(mf.mol, dm)
     if vint is None: vint = mf.get_vint(mf.mol, dm)
     f = {}
-    for t in mf.components.keys():
+    for t,comp in mf.components.items():
         f[t] = cupy.asarray(h1e[t]) + vhf[t] + cupy.asarray(vint[t])
-        if mf.unrestricted and not t.startswith('n') and f[t].ndim == 2:
+        if not t.startswith('n') and isinstance(comp, scf.uhf.UHF) and f[t].ndim == 2:
             f[t] = cupy.asarray((f[t],) * 2)
 
     # CNEO constraint term
@@ -410,9 +409,9 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, vint=None, dm=None, cycle=-1,
 
     # TODO: unpack level_shift_factor and damp_factor
 
-    for t in mf.components.keys():
-        if mf.unrestricted and not t.startswith('n') and \
-                isinstance(dm[t], cupy.ndarray) and dm[t].ndim == 2:
+    for t, comp in mf.components.items():
+        if not t.startswith('n') and isinstance(comp, scf.uhf.UHF) \
+           and isinstance(dm[t], cupy.ndarray) and dm[t].ndim == 2:
             dm[t] = cupy.asarray((dm[t]*0.5,) * 2)
 
     if damp_factor is not None and abs(damp_factor) > 1e-4:
@@ -654,12 +653,8 @@ class HF(scf.hf.SCF):
         self.df_ee = df_ee
         self.auxbasis_e = auxbasis_e
         self.only_dfj_e = only_dfj_e
-        if self.mol.components['e'].nhomo is not None or self.mol.spin != 0:
-            unrestricted = True
-        # When either electron or positron wave function is unrestricted,
-        # both will be unrestricted.
-        if self.mol.components.get('p') is not None and self.mol.components['p'].spin != 0:
-            unrestricted = True
+        # NOTE: unrestricted should be understood as "force unrestricted".
+        # With unrestricted=False, each component will still be RHF/UHF depending on the spin
         self.unrestricted = unrestricted
         self.components = {}
         for t, comp in self.mol.components.items():
@@ -674,7 +669,10 @@ class HF(scf.hf.SCF):
                 if self.unrestricted:
                     mf = scf.UHF(comp)
                 else:
-                    mf = scf.RHF(comp)
+                    if getattr(comp, 'nhomo', None) is not None or comp.spin != 0:
+                        mf = scf.UHF(comp)
+                    else:
+                        mf = scf.RHF(comp)
                 if self.df_ee:
                     mf = mf.density_fit(auxbasis=self.auxbasis_e, only_dfj=self.only_dfj_e)
                 charge = 1.
@@ -886,6 +884,7 @@ class HF(scf.hf.SCF):
                 comp.mo_energy = self.mo_energy[t]
                 comp.mo_coeff = self.mo_coeff[t]
                 comp.mo_occ = self.mo_occ[t]
+                comp.converged = self.converged
         else:
             self.e_tot = kernel(self, self.conv_tol, self.conv_tol_grad,
                                 dm0=dm0, callback=self.callback,
@@ -1001,7 +1000,10 @@ class HF(scf.hf.SCF):
                     if self.unrestricted:
                         mf = scf.UHF(comp)
                     else:
-                        mf = scf.RHF(comp)
+                        if getattr(comp, 'nhomo', None) is not None or comp.spin != 0:
+                            mf = scf.UHF(comp)
+                        else:
+                            mf = scf.RHF(comp)
                     if self.df_ee:
                         mf = mf.density_fit(auxbasis=self.auxbasis_e, only_dfj=self.only_dfj_e)
                     charge = 1.
