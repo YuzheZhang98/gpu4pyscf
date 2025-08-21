@@ -20,6 +20,7 @@
 DIIS
 """
 
+import numpy
 import cupy as cp
 import scipy.linalg
 import scipy.optimize
@@ -55,13 +56,30 @@ class CDIIS(lib.diis.DIIS):
             if not self.incore:
                 logger.debug(self, 'Large system detected. DIIS intermediates '
                              'are saved in the host memory')
-        nao = self.Corth.shape[1]
-        errvec = pack_tril(errvec.reshape(-1,nao,nao))
-        f_tril = pack_tril(f.reshape(-1,nao,nao))
+        # For multi-component SCF, need to flatten f for DIIS, then recover from it
+        was_dict = False
+        if isinstance(f, dict):
+            shapes = {k: v.shape for k, v in f.items()}
+            keys = sorted(f.keys())
+            f_tril = cp.concatenate([f[k].ravel() for k in keys])
+            was_dict = True
+        else:
+            nao = self.Corth.shape[1]
+            errvec = pack_tril(errvec.reshape(-1,nao,nao))
+            f_tril = pack_tril(f.reshape(-1,nao,nao))
         xnew = lib.diis.DIIS.update(self, f_tril, xerr=errvec)
         if self.rollback > 0 and len(self._bookkeep) == self.space:
             self._bookkeep = self._bookkeep[-self.rollback:]
-        return unpack_tril(xnew).reshape(f.shape)
+        if was_dict:
+            offset = 0
+            xnew_dict = {}
+            for k in keys:
+                size = numpy.prod(shapes[k])
+                xnew_dict[k] = xnew[offset:offset + size].reshape(shapes[k])
+                offset += size
+            return xnew_dict
+        else:
+            return unpack_tril(xnew).reshape(f.shape)
 
     def get_num_vec(self):
         if self.rollback:
@@ -69,8 +87,15 @@ class CDIIS(lib.diis.DIIS):
         else:
             return len(self._bookkeep)
 
-    def _sdf_err_vec(self, s, d, f):
+    def _sdf_err_vec(self, s, d, f, Corth=None):
         '''error vector = SDF - FDS'''
+        if isinstance(f, dict):
+            errvec = []
+            for t in sorted(s.keys()):
+                errvec.append(self._sdf_err_vec(s[t], d[t], f[t], self.Corth[t]).ravel())
+            errvec = cp.concatenate(errvec)
+            return errvec
+
         if f.ndim == s.ndim+1: # UHF
             assert len(f) == 2
             if s.ndim == 2: # molecular SCF or single k-point
@@ -79,7 +104,10 @@ class CDIIS(lib.diis.DIIS):
                 sdf = cp.empty_like(f)
                 s.dot(d[0]).dot(f[0], out=sdf[0])
                 s.dot(d[1]).dot(f[1], out=sdf[1])
-                sdf = sandwich_dot(sdf, self.Corth)
+                if Corth is not None:
+                    sdf = sandwich_dot(sdf, Corth[0])
+                else:
+                    sdf = sandwich_dot(sdf, self.Corth)
                 errvec = sdf - sdf.conj().transpose(0,2,1)
             else: # k-points
                 if self.Corth is None:
@@ -105,7 +133,10 @@ class CDIIS(lib.diis.DIIS):
                 if self.Corth is None:
                     self.Corth = eigh(f, s)[1]
                 sdf = s.dot(d).dot(f)
-                sdf = sandwich_dot(sdf, self.Corth)
+                if Corth is not None:
+                    sdf = sandwich_dot(sdf, Corth)
+                else:
+                    sdf = sandwich_dot(sdf, self.Corth)
                 errvec = sdf - sdf.conj().T
             else: # k-points
                 if self.Corth is None:
