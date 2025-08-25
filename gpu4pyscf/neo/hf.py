@@ -228,7 +228,7 @@ def general_scf(method, charge=1, mass=1, is_nucleus=False, nuc_occ_state=0):
         method.nuc_occ_state = nuc_occ_state
         return method
     return pyscf_lib.set_class(ComponentSCF(method, charge, mass, is_nucleus, nuc_occ_state),
-                         (ComponentSCF, method.__class__))
+                               (ComponentSCF, method.__class__))
 
 class Component:
     __name_mixin__ = 'Component'
@@ -277,7 +277,7 @@ class ComponentSCF(Component):
                 mol = self.mol
             veff = cupy.zeros((mol.nao, mol.nao))
             if isinstance(self, scf.hf.KohnShamDFT):
-                veff = pyscf_lib.tag_array(veff, ecoul=0, exc=0, vj=veff.copy(), vk=veff.copy())
+                veff = tag_array(veff, ecoul=0, exc=0, vj=veff.copy(), vk=veff.copy())
         else:
             if abs(self.charge) != 1.:
                 raise NotImplementedError('General charge J/K with tag_array')
@@ -290,7 +290,7 @@ class ComponentSCF(Component):
         if self._vint is not None:
             vhf = veff.view(cupy.ndarray).copy()
             if hasattr(veff, '__dict__'):
-                vhf = pyscf_lib.tag_array(vhf, **veff.__dict__)
+                vhf = tag_array(vhf, **veff.__dict__)
 
             if hasattr(veff, 'vj'): # KS
                 exc = veff.exc
@@ -318,7 +318,11 @@ class ComponentSCF(Component):
                             ecoul += cupy.einsum('ij,ji', dm, vj).real * .5
                 # Update overall veff, note that veff is a tag_array!
                 # The update of vj is a bit useless, because ecoul has already been evaluated.
-                veff = tag_array(veff + self._vint, ecoul=ecoul, exc=exc,
+                if veff.vj is None:
+                    veff = tag_array(veff + self._vint, ecoul=ecoul, exc=exc,
+                                     vj=veff.vj, vk=veff.vk, vhf=vhf)
+                else:
+                    veff = tag_array(veff + self._vint, ecoul=ecoul, exc=exc,
                                      vj=veff.vj+vj, vk=veff.vk, vhf=vhf)
             else: # HF
                 assert not hasattr(self._vint, 'vj') # Must be KS when epc is enabled
@@ -1305,13 +1309,13 @@ class HF(scf.hf.SCF):
                         except PointGroupSymmetryError:
                             logger.warn(self, 'Orbital degeneracy broken')
                     if degen_a is None or degen_b is None:
-                        mo_a = lib.tag_array(comp.mo_coeff[0][:,idxa], orbsym=orbsyma)
-                        mo_b = lib.tag_array(comp.mo_coeff[1][:,idxb], orbsym=orbsymb)
+                        mo_a = tag_array(comp.mo_coeff[0][:,idxa], orbsym=orbsyma)
+                        mo_b = tag_array(comp.mo_coeff[1][:,idxb], orbsym=orbsymb)
                     else:
-                        mo_a = lib.tag_array(comp.mo_coeff[0][:,idxa], orbsym=orbsyma,
-                                             degen_mapping=degen_a)
-                        mo_b = lib.tag_array(comp.mo_coeff[1][:,idxb], orbsym=orbsymb,
-                                             degen_mapping=degen_b)
+                        mo_a = tag_array(comp.mo_coeff[0][:,idxa], orbsym=orbsyma,
+                                         degen_mapping=degen_a)
+                        mo_b = tag_array(comp.mo_coeff[1][:,idxb], orbsym=orbsymb,
+                                         degen_mapping=degen_b)
                     self.mo_coeff[t] = comp.mo_coeff = (mo_a, mo_b)
                     self.mo_occ[t] = comp.mo_occ = cupy.asarray([comp.mo_occ[0][idxa], comp.mo_occ[1][idxb]])
                 else:
@@ -1334,9 +1338,9 @@ class HF(scf.hf.SCF):
                         except PointGroupSymmetryError:
                             logger.warn(self, 'Orbital degeneracy broken')
                     if degen_mapping is None:
-                        self.mo_coeff[t] = comp.mo_coeff = lib.tag_array(comp.mo_coeff[:,idx], orbsym=orbsym)
+                        self.mo_coeff[t] = comp.mo_coeff = tag_array(comp.mo_coeff[:,idx], orbsym=orbsym)
                     else:
-                        self.mo_coeff[t] = comp.mo_coeff = lib.tag_array(
+                        self.mo_coeff[t] = comp.mo_coeff = tag_array(
                             comp.mo_coeff[:,idx], orbsym=orbsym, degen_mapping=degen_mapping)
             if self.chkfile:
                 chkfile.dump_scf(self.mol, self.chkfile, self.e_tot, self.mo_energy,
