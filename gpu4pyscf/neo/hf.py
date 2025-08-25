@@ -702,11 +702,11 @@ def get_fock(mf, h1e=None, s1e=None, vhf=None, vint=None, dm=None, cycle=-1,
 
             if diis_type == 1:
                 f0_flat = cupy.concatenate([f0[k].ravel() for k in keys])
-                f_flat = diis.update(f0_flat, scf.diis.get_err_vec(s1e, dm, f))
+                f_flat = diis.update(f0_flat, diis.cdiis._sdf_err_vec(s1e, dm, f))
             elif diis_type == 2:
                 f_flat = diis.update(f_flat)
             elif diis_type == 3:
-                f_flat = diis.update(f_flat, scf.diis.get_err_vec(s1e, dm, f))
+                f_flat = diis.update(f_flat, diis.cdiis._sdf_err_vec(s1e, dm, f))
             else:
                 print("\nWARN: Unknow CDFT DIIS type, NO DIIS IS USED!!!\n")
 
@@ -814,6 +814,9 @@ def kernel(mf, conv_tol=1e-10, conv_tol_grad=None,
         # mf_diis needs to be the raw lib.diis.DIIS() for CNEO
         mf_diis = lib.diis.DIIS()
         mf_diis.space = 8
+        # add a CDIIS to use its member _sdf_err_vec
+        mf_diis.cdiis = scf.diis.CDIIS()
+        _, mf_diis.cdiis.Corth = mf.eig(fock, s1e)
 
     if dump_chk and mf.chkfile:
         # Explicit overwrite the mol object in chkfile

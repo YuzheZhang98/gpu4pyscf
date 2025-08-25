@@ -179,9 +179,11 @@ class _DFNEO:
         # Need this because components and interactions can be
         # completely destroyed in super().reset
         if not isinstance(self.components['e'], df_jk._DFHF):
-            self.components['e'] = df_jk.density_fit(self.components['e'],
-                                                     auxbasis=self.auxbasis,
-                                                     only_dfj=self.ee_only_dfj)
+            obj = self.components['e'].undo_component()
+            obj = df_jk.density_fit(self.components['e'],
+                                    auxbasis=self.auxbasis,
+                                    only_dfj=self.ee_only_dfj)
+            self.components['e'] = hf.general_scf(obj, charge=1.)
             if isinstance(self, neo.KS):
                 self.interactions = hf.generate_interactions(
                     self.components, DFInteractionCorrelation,
