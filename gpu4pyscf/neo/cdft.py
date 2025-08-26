@@ -167,7 +167,7 @@ class CDFT(ks.KS):
     def reset(self, mol=None):
         '''Reset mol and relevant attributes associated to the old mol object'''
         super().reset(mol=mol)
-        self.f = cupy.zeros((self.mol.natm, 3))
+        self.f = numpy.zeros((self.mol.natm, 3))
         self._setup_position_matrices()
         return self
 
