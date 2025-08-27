@@ -460,16 +460,14 @@ class Gradients(rhf_grad.GradientsBase):
         if self.verbose >= logger.INFO:
             self.dump_flags()
 
-        # Get gradient from each component
-        de = 0
+        # Get inter-component interaction gradient first
+        de = self.grad_int(mo_energy, mo_coeff, mo_occ, atmlst)
+        # add gradient from each component
         for t, comp in self.components.items():
             if self.grid_response is not None and isinstance(comp.base, hf.KohnShamDFT):
                 comp.grid_response = self.grid_response
             de += comp.grad_elec(mo_energy=mo_energy[t], mo_coeff=mo_coeff[t],
                                  mo_occ=mo_occ[t], atmlst=atmlst)
-
-        # Add inter-component interaction gradient
-        de += self.grad_int(mo_energy, mo_coeff, mo_occ, atmlst)
 
         # Add EPC contribution if needed
         if hasattr(self.base, 'epc') and self.base.epc is not None:

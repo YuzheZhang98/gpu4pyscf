@@ -168,8 +168,8 @@ class _DFNEO:
                 auxbasis=self.auxbasis)
 
     def nuc_grad_method(self):
-        import pyscf.neo.df_grad
-        return pyscf.neo.df_grad.Gradients(self)
+        import gpu4pyscf.neo.df_grad
+        return gpu4pyscf.neo.df_grad.Gradients(self)
 
     Gradients = pyscf_lib.alias(nuc_grad_method, alias_name='Gradients')
 
