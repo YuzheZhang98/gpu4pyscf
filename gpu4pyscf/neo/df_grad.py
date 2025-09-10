@@ -200,8 +200,8 @@ def grad_int(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
 
     mol_n = {}
     dm_n = {}
-    intopt_n = {}
-    cderi_n = {}
+    intopt_n = mf.intopt_n
+    cderi_n = mf.cderi_n
     charge_n = {}
     for (t1, t2), interaction in mf.interactions.items():
         comp1 = mf.components[t1]
@@ -232,8 +232,6 @@ def grad_int(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
                 with_df = comp1.with_df
                 dm_e = dm1
                 dm_n[t2] = dm2
-                intopt_n[t2] = interaction.intopt
-                cderi_n[t2] = interaction._cderi[0]
                 charge_n[t2] = comp2.charge
             else:
                 mol_e = mol2
@@ -241,10 +239,7 @@ def grad_int(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
                 with_df = comp2.with_df
                 dm_e = dm2
                 dm_n[t1] = dm1
-                intopt_n[t1] = interaction.intopt
-                cderi_n[t1] = interaction._cderi[0]
                 charge_n[t1] = comp1.charge
-            low = interaction._low
 
         else:
             de += grad.grad_pair_int(mol1, mol2, dm1, dm2,
@@ -252,7 +247,8 @@ def grad_int(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
 
     if mol_n and dm_n and intopt_n and cderi_n and charge_n:
         de += get_cross_j(with_df, mol_e, mol_n, with_df.intopt, intopt_n,
-                          dm_e, dm_n, with_df._cderi[0], cderi_n, low, charge_n)
+                          dm_e, dm_n, with_df._cderi[0], cderi_n,
+                          with_df.cd_low, charge_n)
 
     if log.verbose >= logger.DEBUG:
         log.debug('gradients of Coulomb interaction')
