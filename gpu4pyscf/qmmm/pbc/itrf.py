@@ -228,6 +228,8 @@ class QMMMSCF(QMMM):
 
     def get_qm_charges(self, dm):
         dm = cp.asarray(dm)
+        if dm.ndim == 3:
+            dm = dm[0] + dm[1]
         aoslices = self.mol.aoslice_by_atom()
         chg = self.mol.atom_charges()
         dmS = cp.dot(dm, cp.asarray(self.get_ovlp()))
@@ -254,6 +256,8 @@ class QMMMSCF(QMMM):
 
     def get_qm_dipoles(self, dm, s1r=None):
         dm = cp.asarray(dm)
+        if dm.ndim == 3:
+            dm = dm[0] + dm[1]
         if s1r is None:
             s1r = self.get_s1r()
         aoslices = self.mol.aoslice_by_atom()
@@ -290,6 +294,8 @@ class QMMMSCF(QMMM):
 
     def get_qm_quadrupoles(self, dm, s1rr=None):
         dm = cp.asarray(dm)
+        if dm.ndim == 3:
+            dm = dm[0] + dm[1]
         if s1rr is None:
             s1rr = self.get_s1rr()
         aoslices = self.mol.aoslice_by_atom()
