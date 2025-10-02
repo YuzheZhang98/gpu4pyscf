@@ -134,6 +134,8 @@ def as_scanner(mf):
     '''Generating a scanner/solver for (C)NEO PES.
     Copied from scf.hf.as_scanner
     '''
+    if mf.mol.mm_mol is not None:
+        raise NotImplementedError('(C)NEO PBC QM/MM scanner not implemneted.')
     if isinstance(mf, pyscf_lib.SinglePointScanner):
         return mf
 
